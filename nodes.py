@@ -1,6 +1,7 @@
 import os
-
+import re
 import numpy as np
+import matplotlib.colors as mcolors
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
@@ -38,6 +39,8 @@ class TextOverlay:
         - dict: A dictionary specifying required inputs and their attributes.
         """
 
+        file_list = cls.get_font_list()
+
         return {
             "required": {
                 "image": ("IMAGE",),  # Input image to overlay text on
@@ -49,10 +52,7 @@ class TextOverlay:
                     "INT",
                     {"default": 32, "min": 1, "max": 9999, "step": 1},
                 ),  # Font size
-                "font": (
-                    "STRING",
-                    {"default": "ariblk.ttf"},
-                ),  # Font name (e.g. arial.ttf)
+                "font": (file_list,),
                 "fill_color_hex": (
                     "STRING",
                     {"default": "#FFFFFF"},
@@ -63,7 +63,7 @@ class TextOverlay:
                 ),  # Text stroke color in hex
                 "stroke_thickness": (
                     "FLOAT",
-                    {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01},
+                    {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05},
                 ),  # Stroke thickness
                 "padding": (
                     "INT",
@@ -89,6 +89,10 @@ class TextOverlay:
                     "FLOAT",
                     {"default": 4.0, "min": 0.0, "max": 50.0, "step": 0.5},
                 ),  # Spacing between lines of text
+                "stroke_opacity": (
+                    "FLOAT",
+                    {"default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1},
+                ),  # Stroke thickness
             }
         }
 
@@ -97,62 +101,73 @@ class TextOverlay:
     FUNCTION = "batch_process"
     CATEGORY = "image/text"
 
-    def hex_to_rgb(self, hex_color):
+    @staticmethod
+    def hex_to_rgba(hex_color, opacity=1.0):
         """
-        Converts a hex color string to an RGB tuple.
-
-        Parameters:
-        - hex_color (str): The color in hex format as a string.
-
-        Returns:
-        - tuple: The color converted to an (R, G, B) tuple.
+        Converts hex color to RGBA tuple, supporting #RGB, #RGBA, #RRGGBB, #RRGGBBAA formats.
         """
-
         hex_color = hex_color.lstrip("#")
-        if len(hex_color) == 3:
-            hex_color = hex_color * 2
-        return tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+        if len(hex_color) not in (3, 4, 6, 8):
+            raise ValueError(f"Invalid hex color format: {hex_color}")
+
+        # Expand 3/4-char hex to 6/8-char
+        if len(hex_color) in (3, 4):
+            hex_color = ''.join(c * 2 for c in hex_color)
+
+        # Convert to RGB values
+        rgb = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+        # Get alpha from hex or opacity parameter
+        alpha = int(int(hex_color[6:8], 16) if len(hex_color) == 8 else 255 * opacity)
+
+        return rgb + (alpha,)
+
+    @staticmethod
+    def parse_color(color_string, opacity=1.0):
+        """
+        Accept CSS-style colors, named, hex, rgba(), or three comma-separated decimals.
+        Always uses matplotlib for all conversion.
+        Returns (r, g, b, a) tuple, each 0–255.
+        """
+        color_string = color_string.strip()
+        # If input is three comma-separated numbers, convert to rgb(...) CSS string
+        rgb_match =re.fullmatch(r"\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*", color_string)
+        if rgb_match:
+            color_string = f"rgb({rgb_match.group(1)},{rgb_match.group(2)},{rgb_match.group(3)})"
+
+        try:
+            r, g, b, a = mcolors.to_rgba(color_string)
+            a = a * opacity
+            return (
+                int(round(r * 255)),
+                int(round(g * 255)),
+                int(round(b * 255)),
+                int(round(a * 255))
+            )
+        except Exception:
+            raise ValueError(f"Could not parse the color: {color_string}")
 
     def draw_text(
-        self,
-        image,
-        text,
-        font_size,
-        font,
-        fill_color_hex,
-        stroke_color_hex,
-        stroke_thickness,
-        padding,
-        horizontal_alignment,
-        vertical_alignment,
-        x_shift,
-        y_shift,
-        line_spacing,
-        use_cache=False,
+            self,
+            image,
+            text,
+            font_size,
+            font,
+            fill_color_hex,
+            stroke_color_hex,
+            stroke_thickness,
+            padding,
+            horizontal_alignment,
+            vertical_alignment,
+            x_shift,
+            y_shift,
+            line_spacing,
+            stroke_opacity,
+            use_cache=False,
     ):
         """
         Draws the specified text on the given image with the provided styling and alignment options.
-
-        Parameters:
-        - image (PIL.Image.Image): The image to draw text on.
-        - text (str): The text to overlay on the image.
-        - font_size (int): The font size of the text.
-        - font (str): The font type of the text.
-        - fill_color_hex (str): The fill color of the text in hex format.
-        - stroke_color_hex (str): The stroke color of the text in hex format.
-        - stroke_thickness (float): The thickness of the text stroke.
-        - padding (int): The padding around the text.
-        - horizontal_alignment (str): The horizontal alignment of the text ('left', 'center', 'right').
-        - vertical_alignment (str): The vertical alignment of the text ('top', 'middle', 'bottom').
-        - x_shift (int): Horizontal position adjustment for the text.
-        - y_shift (int): Vertical position adjustment for the text.
-        - line_spacing (float): Spacing between lines of text.
-        - use_cache (bool): Flag to use cached font and position calculations to improve performance.
-
-        Returns:
-        - PIL.Image.Image: The image with the text overlay applied.
         """
-
         # Load font from the fonts directory or use default if not found or specified to not use cache
         if self._loaded_font is None or use_cache is False:
             fonts_dir = os.path.join(os.path.dirname(__file__), "fonts")
@@ -169,8 +184,9 @@ class TextOverlay:
                 print(f"Error loading font: {e}... Using default font")
                 self._loaded_font = ImageFont.load_default(font_size)
 
-        # Prepare to draw on the image
-        draw = ImageDraw.Draw(image)
+        # Create a transparent layer for the text
+        txt = Image.new("RGBA", image.size, (255, 255, 255, 0))
+        draw = ImageDraw.Draw(txt)
 
         # Process text for multiline support and fit within image dimensions
         words = text.replace("\n", "\n ").split(" ")
@@ -180,8 +196,8 @@ class TextOverlay:
                 extra_line = "\n" in word
                 word = word.strip()
                 if (
-                    draw.textlength(line + word, font=self._loaded_font)
-                    < image.width - 2 * padding
+                        draw.textlength(line + word, font=self._loaded_font)
+                        < image.width - 2 * padding
                 ):
                     line += word + " "
                 else:
@@ -218,34 +234,51 @@ class TextOverlay:
                 self._y = image.height - (bottom - top) - padding
             self._y += y_shift
 
-        # Draw the processed text onto the image
+        # Convert colors to RGBA
+        fill_color = self.parse_color(fill_color_hex)
+        stroke_color = self.parse_color(stroke_color_hex, stroke_opacity)
+
+        # Draw text on the transparent layer
         draw.text(
             (self._x, self._y),
             self._full_text,
-            fill=self.hex_to_rgb(fill_color_hex),
-            stroke_fill=self.hex_to_rgb(stroke_color_hex),
+            fill=fill_color,
+            stroke_fill=stroke_color,
             stroke_width=int(font_size * stroke_thickness * 0.5),
             font=self._loaded_font,
             align=horizontal_alignment,
             spacing=line_spacing,
         )
-        return image
+        # Store original mode
+        original_mode = image.mode
+
+        # Convert the input image to RGBA if it isn't already
+        if original_mode != 'RGBA':
+            image = image.convert('RGBA')
+
+        # Composite the text layer onto the image and convert back to original mode
+        result = Image.alpha_composite(image, txt)
+        if original_mode != 'RGBA':
+            result = result.convert(original_mode)
+
+        return result
 
     def batch_process(
-        self,
-        image,
-        text,
-        font_size,
-        font,
-        fill_color_hex,
-        stroke_color_hex,
-        stroke_thickness,
-        padding,
-        horizontal_alignment,
-        vertical_alignment,
-        x_shift,
-        y_shift,
-        line_spacing,
+            self,
+            image,
+            text,
+            font_size,
+            font,
+            fill_color_hex,
+            stroke_color_hex,
+            stroke_thickness,
+            padding,
+            horizontal_alignment,
+            vertical_alignment,
+            x_shift,
+            y_shift,
+            line_spacing,
+            stroke_opacity,
     ):
         """
         Processes a batch of images or a single image, adding the specified text overlay
@@ -288,6 +321,7 @@ class TextOverlay:
                 x_shift,
                 y_shift,
                 line_spacing,
+                stroke_opacity,
             )
             image_tensor_out = torch.tensor(np.array(image).astype(np.float32) / 255.0)
             image_tensor_out = torch.unsqueeze(image_tensor_out, 0)
@@ -311,6 +345,7 @@ class TextOverlay:
                     x_shift,
                     y_shift,
                     line_spacing,
+                    stroke_opacity,
                     use_cache,
                 )
                 images_out.append(np.array(img).astype(np.float32) / 255.0)
@@ -318,6 +353,24 @@ class TextOverlay:
             images_np = np.stack(images_out)
             images_tensor = torch.from_numpy(images_np)
             return (images_tensor,)
+
+    @staticmethod
+    def get_font_list():
+        """
+        Retrieve the list of available font files in the fonts directory.
+
+        This method scans the `fonts` directory and compiles a list of all font files
+        with a `.ttf` extension. The `fonts` directory path is determined relative to
+        the current file's location.
+
+        Returns:
+            list[str]: List of font file names with a `.ttf` extension in the `fonts`
+            directory.
+        """
+        font_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "fonts")
+        file_list = [f for f in os.listdir(font_dir) if
+                     os.path.isfile(os.path.join(font_dir, f)) and f.lower().endswith(".ttf")]
+        return file_list
 
 
 # Mapping of node class names to their respective classes
